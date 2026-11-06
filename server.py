@@ -213,7 +213,11 @@ def parse_opensky(payload):
 # Data providers
 # --------------------------------------------------------------------------
 
-def http_get_json(url, timeout=10, data=None, headers=None):
+HTTP_TIMEOUT = float(os.environ.get("OPENFLIGHT_HTTP_TIMEOUT", "10"))
+
+
+def http_get_json(url, timeout=None, data=None, headers=None):
+    timeout = HTTP_TIMEOUT if timeout is None else min(timeout, HTTP_TIMEOUT * 2)
     hdrs = {"User-Agent": USER_AGENT, "Accept": "application/json", "Accept-Encoding": "gzip"}
     if headers:
         hdrs.update(headers)
@@ -676,15 +680,20 @@ class Recorder(threading.Thread):
 # --------------------------------------------------------------------------
 
 class App:
-    def __init__(self, args):
+    def __init__(self, args, serverless=False):
         self.args = args
+        # On serverless hosts (Vercel) there is no lasting disk or background thread,
+        # so nothing is recorded: replay falls back to the 1st-of-month samples.
+        self.serverless = serverless
         self.live = LiveSource(args.providers)
         self.demo = next((p for p in self.live.providers if isinstance(p, DemoProvider)), None)
         self.store = Store(args.db, args.record_interval, args.retention_days)
         self.samples = AdsbxSamples(enabled=not args.no_samples and self.demo is None)
 
 
-def make_handler(app):
+def make_handler(app, fixed_route=None):
+    """Build the request handler. fixed_route pins it to one API route (used by Vercel functions)."""
+
     class Handler(SimpleHTTPRequestHandler):
         server_version = "OpenFlight/0.1"
 
@@ -702,7 +711,7 @@ def make_handler(app):
 
         def send_json(self, obj, status=200):
             body = json.dumps(obj, separators=(",", ":")).encode("utf-8")
-            if "gzip" in self.headers.get("Accept-Encoding", "") and len(body) > 1024:
+            if not app.serverless and "gzip" in self.headers.get("Accept-Encoding", "") and len(body) > 1024:
                 body = gzip.compress(body, 5)
                 gz = True
             else:
@@ -717,7 +726,8 @@ def make_handler(app):
 
         def do_GET(self):
             url = urllib.parse.urlparse(self.path)
-            if not url.path.startswith("/api/"):
+            path = fixed_route or url.path
+            if not path.startswith("/api/"):
                 return super().do_GET()
             q = {k: v[-1] for k, v in urllib.parse.parse_qs(url.query).items()}
             route = {
@@ -727,7 +737,7 @@ def make_handler(app):
                 "/api/trail": self.api_trail,
                 "/api/route": self.api_route,
                 "/api/find": self.api_find,
-            }.get(url.path)
+            }.get(path)
             if route is None:
                 return self.send_json({"error": "not found"}, 404)
             try:
@@ -749,6 +759,7 @@ def make_handler(app):
                 "recorded": app.store.coverage(),
                 "samples": app.samples.enabled,
                 "demo": app.demo is not None,
+                "serverless": app.serverless,
                 "lastError": app.live.last_error,
                 "now": time.time(),
             })
@@ -758,7 +769,7 @@ def make_handler(app):
             lat, lon = float(q["lat"]), wrap_lon(float(q["lon"]))
             radius = clamp(float(q.get("radius", 100)), 1, MAX_RADIUS_NM)
             aircraft, source = app.live.fetch(lat, lon, radius)
-            if not isinstance(app.live.providers[app.live.active], DemoProvider):
+            if not app.serverless and not isinstance(app.live.providers[app.live.active], DemoProvider):
                 app.store.record(aircraft)
             self.send_json({"now": time.time(), "source": source, "aircraft": aircraft})
 
@@ -861,12 +872,44 @@ def build_arg_parser():
     return p
 
 
-def main(argv=None):
-    args = build_arg_parser().parse_args(argv)
+def resolve_providers(args):
     if args.demo:
         args.providers = ["demo"]
     elif not args.providers:
         args.providers = ["adsb.lol", "airplanes.live", "adsb.fi"]
+    return args
+
+
+_serverless_app = None
+_serverless_lock = threading.Lock()
+
+
+def serverless_app():
+    """One shared App per serverless instance, configured from environment variables:
+
+    OPENFLIGHT_DEMO=1                      simulated traffic
+    OPENFLIGHT_PROVIDERS=adsb.lol,adsb.fi  live sources in fallback order
+    OPENFLIGHT_TILES=https://...           raster tile URL
+    OPENFLIGHT_NO_SAMPLES=1                skip ADS-B Exchange 1st-of-month samples
+    """
+    global _serverless_app, HTTP_TIMEOUT
+    with _serverless_lock:
+        if _serverless_app is None:
+            argv = ["--db", ":memory:"]
+            if os.environ.get("OPENFLIGHT_DEMO", "").lower() in ("1", "true", "yes"):
+                argv.append("--demo")
+            for name in filter(None, (x.strip() for x in os.environ.get("OPENFLIGHT_PROVIDERS", "").split(","))):
+                argv += ["--provider", name]
+            if os.environ.get("OPENFLIGHT_NO_SAMPLES", "").lower() in ("1", "true", "yes"):
+                argv.append("--no-samples")
+            if "OPENFLIGHT_HTTP_TIMEOUT" not in os.environ:
+                HTTP_TIMEOUT = 6.0  # leave room to try the fallbacks inside the function time limit
+            _serverless_app = App(resolve_providers(build_arg_parser().parse_args(argv)), serverless=True)
+        return _serverless_app
+
+
+def main(argv=None):
+    args = resolve_providers(build_arg_parser().parse_args(argv))
     app = App(args)
     if args.areas:
         Recorder(app.live, app.store, args.areas, max(1.0, args.record_interval)).start()

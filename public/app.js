@@ -120,6 +120,24 @@
     set(k, v) { try { localStorage.setItem('openflight.' + k, JSON.stringify(v)); } catch { /* ignore */ } },
   };
 
+  // ------------------------------------------------------------------ API
+
+  async function getJSON(url) {
+    const res = await fetch(url, { cache: 'no-store' });
+    const text = await res.text();
+    let j;
+    try {
+      j = JSON.parse(text);
+    } catch {
+      throw new Error(res.status === 404
+        ? `${new URL(url, location.href).pathname} was not found (HTTP 404). The page is being served without the OpenFlight API: ` +
+          'run "python3 server.py", or deploy with the api/ folder (see README)'
+        : `the server sent a non-JSON reply (HTTP ${res.status})`);
+    }
+    if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+    return j;
+  }
+
   // ------------------------------------------------------------------ toast
 
   let toastTimer = null;
@@ -304,9 +322,7 @@
     }
     state.inflight = true;
     try {
-      const res = await fetch(`${path}?${params}`, { cache: 'no-store' });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+      const j = await getJSON(`${path}?${params}`);
       if (gen !== state.gen) return;
       if (state.mode === 'live') {
         state.serverOffset = j.now - realNow();
@@ -316,8 +332,11 @@
         ingest(j.aircraft, j.t);
         if (j.source === 'none' && !state.aircraft.size && !state.noDataWarned) {
           state.noDataWarned = true;
-          toast('No recorded flights here at this time. OpenFlight can replay times it was running and ' +
-            'recording (see --record in the README), plus the 1st day of each month worldwide.', 'info', 9000);
+          toast(state.config.serverless
+            ? 'No flight history for this time. The hosted version can only replay the 1st day of each month; ' +
+              'run server.py on your own computer to record and replay any time.'
+            : 'No recorded flights here at this time. OpenFlight can replay times it was running and ' +
+              'recording (see --record in the README), plus the 1st day of each month worldwide.', 'info', 9000);
         } else if (j.source !== 'none') {
           state.noDataWarned = false;
         }
@@ -577,9 +596,7 @@
     if (state.mode !== 'live') { showHits([], 'Worldwide search only works in live mode'); return; }
     showHits([], 'Searching…');
     try {
-      const res = await fetch(`/api/find?q=${encodeURIComponent(q)}`);
-      const j = await res.json();
-      if (!res.ok) throw new Error(j.error);
+      const j = await getJSON(`/api/find?q=${encodeURIComponent(q)}`);
       if (j.aircraft.length) showHits(j.aircraft.slice(0, 8));
       else showHits([], `No aircraft found for “${q}”`);
     } catch (err) {
@@ -692,6 +709,12 @@
       el.textContent = 'Demo mode: simulated traffic, any date and time works.';
       return;
     }
+    if (c.serverless) {
+      el.textContent = c.samples
+        ? 'Hosted version: replay works for the 1st of each month. Run server.py yourself to record any time.'
+        : 'Hosted version: live only. Run server.py yourself to record and replay.';
+      return;
+    }
     const parts = [];
     if (c.recorded && c.recorded.from) parts.push(`Replay recorded from ${fmtLocal(c.recorded.from, true)}`);
     else parts.push('Nothing recorded yet; replay fills in as you watch');
@@ -759,8 +782,7 @@
 
   async function loadConfig() {
     try {
-      const res = await fetch('/api/config', { cache: 'no-store' });
-      const cfg = await res.json();
+      const cfg = await getJSON('/api/config');
       const first = !state.config;
       state.config = cfg;
       if (first) {

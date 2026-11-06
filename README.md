@@ -24,6 +24,21 @@ To try it with simulated traffic (no internet needed, and every date works):
 python3 server.py --demo
 ```
 
+## Deploy to Vercel (free)
+
+Import the repo into Vercel with the default settings. The website comes from `public/`, and each file in `api/` becomes a small serverless function that runs the same code as `server.py`. No build step is needed.
+
+Optional environment variables (Project → Settings → Environment Variables):
+
+| Variable | Effect |
+|---|---|
+| `OPENFLIGHT_DEMO=1` | simulated traffic instead of real flights |
+| `OPENFLIGHT_PROVIDERS=adsb.fi,airplanes.live` | choose live sources and their fallback order |
+| `OPENFLIGHT_TILES=https://…/{z}/{x}/{y}.png` | a different map tile server |
+| `OPENFLIGHT_NO_SAMPLES=1` | turn off 1st-of-month history |
+
+**What's different on Vercel:** serverless functions can't run in the background or keep files, so the hosted site **does not record**. Live view and 3D work the same. Replay only works for the 1st day of each month (ADS-B Exchange samples), or for any time in demo mode. For full recording and replay, run `python3 server.py` on a machine that stays on, such as a home PC, a Raspberry Pi or a free VM.
+
 ## Where the data comes from
 
 | What | Source | Cost / key |
@@ -101,6 +116,8 @@ The tests cover parsing, interpolation, recording and replay. A fake upstream se
 
 ```
 server.py            HTTP server, data providers, recorder, replay
+api/*.py             Vercel serverless entry points (thin wrappers around server.py)
+vercel.json          Vercel settings
 public/index.html    page layout
 public/app.js        map, 3D rendering, time controls
 public/style.css     styles

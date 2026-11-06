@@ -182,5 +182,38 @@ class EndToEndTests(unittest.TestCase):
             self.assertIn(b"OpenFlight", r.read())
 
 
+class VercelFunctionTests(unittest.TestCase):
+    """Load api/*.py the way Vercel does and check each answers on its own route."""
+
+    def test_functions(self):
+        import importlib.util
+        os.environ["OPENFLIGHT_DEMO"] = "1"
+        server._serverless_app = None
+        root = os.path.join(os.path.dirname(__file__), "..")
+        try:
+            for name in ("config", "live", "history", "trail", "find", "route"):
+                spec = importlib.util.spec_from_file_location("vercel_" + name, os.path.join(root, "api", name + ".py"))
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), mod.handler)
+                threading.Thread(target=httpd.serve_forever, daemon=True).start()
+                # Vercel may hand the function the original URL or its own path; both must work.
+                url = "http://127.0.0.1:%d/api/%s?lat=51.5&lon=-0.2&radius=100&t=%d&hex=d00001&q=d00001&callsign=X" % (
+                    httpd.server_address[1], name, time.time() - 3600)
+                with urllib.request.urlopen(url, timeout=10) as r:
+                    body = json.loads(r.read())
+                    self.assertNotIn("Content-Encoding", r.headers)
+                httpd.shutdown()
+                httpd.server_close()
+                if name == "config":
+                    self.assertTrue(body["serverless"])
+                    self.assertTrue(body["demo"])
+                if name in ("live", "history"):
+                    self.assertGreater(len(body["aircraft"]), 0)
+        finally:
+            del os.environ["OPENFLIGHT_DEMO"]
+            server._serverless_app = None
+
+
 if __name__ == "__main__":
     unittest.main()
