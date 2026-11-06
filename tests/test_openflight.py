@@ -192,7 +192,11 @@ class VercelFunctionTests(unittest.TestCase):
         root = os.path.join(os.path.dirname(__file__), "..")
         try:
             for name in ("config", "live", "history", "trail", "find", "route"):
-                spec = importlib.util.spec_from_file_location("vercel_" + name, os.path.join(root, "api", name + ".py"))
+                path = os.path.join(root, "api", name + ".py")
+                with open(path) as fh:
+                    # Vercel's build only detects a Python function from a literal "class handler" line.
+                    self.assertRegex(fh.read(), r"(?m)^class handler\(")
+                spec = importlib.util.spec_from_file_location("vercel_" + name, path)
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
                 httpd = ThreadingHTTPServer(("127.0.0.1", 0), mod.handler)
