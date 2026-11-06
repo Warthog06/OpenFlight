@@ -321,6 +321,9 @@
       path = '/api/history';
     }
     state.inflight = true;
+    const slow = state.mode === 'replay'
+      ? setTimeout(() => { if (gen === state.gen) toast('Loading flight history for this half hour…', 'info'); }, 900)
+      : null;
     try {
       const j = await getJSON(`${path}?${params}`);
       if (gen !== state.gen) return;
@@ -332,11 +335,7 @@
         ingest(j.aircraft, j.t);
         if (j.source === 'none' && !state.aircraft.size && !state.noDataWarned) {
           state.noDataWarned = true;
-          toast(state.config.serverless
-            ? 'No flight history for this time. The hosted version can only replay the 1st day of each month; ' +
-              'run openflight.py on your own computer to record and replay any time.'
-            : 'No recorded flights here at this time. OpenFlight can replay times it was running and ' +
-              'recording (see --record in the README), plus the 1st day of each month worldwide.', 'info', 9000);
+          toast(noDataMessage(t), 'info', 9000);
         } else if (j.source !== 'none') {
           state.noDataWarned = false;
         }
@@ -349,6 +348,8 @@
           : `Could not load history: ${err.message}`);
       }
     } finally {
+      clearTimeout(slow);
+      if (slow && gen === state.gen && $('toast').textContent.startsWith('Loading flight history')) hideToast();
       state.inflight = false;
     }
   }
@@ -701,6 +702,20 @@
     dtInput.max = toInputValue(liveNow());
   }
 
+  function noDataMessage(t) {
+    const c = state.config;
+    const a = c.archive;
+    if (a && t >= a.to) {
+      return `The replay archive is updated every half hour, so it currently ends at ${fmtLocal(a.to, false)}. ` +
+        'Pick an earlier time, or press Live.';
+    }
+    if (a && t < a.from) {
+      return `Replay goes back to ${fmtLocal(a.from, true)}. ` +
+        (c.samples ? 'Older dates only work on the 1st day of a month.' : 'Pick a later date.');
+    }
+    return 'No aircraft were tracked in this area at this time.';
+  }
+
   function updateCoverage() {
     const c = state.config;
     if (!c) return;
@@ -709,17 +724,17 @@
       el.textContent = 'Demo mode: simulated traffic, any date and time works.';
       return;
     }
-    if (c.serverless) {
-      el.textContent = c.samples
-        ? 'Hosted version: replay works for the 1st of each month. Run openflight.py yourself to record any time.'
-        : 'Hosted version: live only. Run openflight.py yourself to record and replay.';
-      return;
-    }
     const parts = [];
-    if (c.recorded && c.recorded.from) parts.push(`Replay recorded from ${fmtLocal(c.recorded.from, true)}`);
-    else parts.push('Nothing recorded yet; replay fills in as you watch');
-    if (c.samples) parts.push('plus the 1st of every month worldwide');
-    el.textContent = parts.join(', ') + '.';
+    if (c.archive) {
+      parts.push(`Replay: any time since ${new Date(c.archive.from * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ` +
+        '(up to the last half hour)');
+      if (!c.serverless) parts.push('plus anything you watched live');
+    } else if (!c.serverless) {
+      parts.push(c.recorded && c.recorded.from ? `Replay recorded from ${fmtLocal(c.recorded.from, true)}`
+        : 'Replay fills in as you watch');
+    }
+    if (c.samples) parts.push('and the 1st of each month before that');
+    el.textContent = parts.length ? parts.join(', ') + '.' : 'Live only.';
   }
 
   // ------------------------------------------------------------------ view options

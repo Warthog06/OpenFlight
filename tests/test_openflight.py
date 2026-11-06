@@ -97,6 +97,62 @@ class DemoTests(unittest.TestCase):
         self.assertTrue(any(a[h]["lat"] != c[h]["lat"] for h in common))
 
 
+def heatmap_file(start, slices):
+    """Build a half-hour file in adsb.lol's binary replay format.
+
+    slices: list of (seconds after start, [(icao, lat, lon, alt_ft or "ground", gs_kt)], [(icao, callsign, squawk)])
+    """
+    import struct
+    out = b""
+    for offset, positions, infos in slices:
+        ms = int((start + offset) * 1000)
+        out += struct.pack("<iIIi", server.AdsbLolArchive.MAGIC, ms >> 32, ms & 0xFFFFFFFF, 10000)
+        for icao, lat, lon, alt, gs in positions:
+            a = -123 if alt == "ground" else int(alt / 25)
+            out += struct.pack("<iiii", icao, int(lat * 1e6), int(lon * 1e6), (int(gs * 10) << 16) | (a & 0xFFFF))
+        for icao, cs, sq in infos:
+            out += struct.pack("<ii", icao, (1 << 30) | int(sq)) + cs.encode().ljust(8, b"\0")
+    return out
+
+
+class ArchiveTests(unittest.TestCase):
+    def test_decode_and_interpolate(self):
+        start = (time.time() // 1800) * 1800 - 86400  # yesterday, same half hour
+        data = heatmap_file(start, [
+            (0, [(0x4CA123, 51.0, -1.0, 30000, 450), (0x406ABC, 51.47, -0.45, "ground", 0)], [(0x4CA123, "RYR1AB", "1234")]),
+            (10, [(0x4CA123, 51.0, -0.9, 30500, 450)], []),
+            (20, [(0x4CA123, 51.0, -0.8, 31000, 450), (0x406ABC, 51.47, -0.45, "ground", 0)], []),
+        ])
+        urls = []
+        orig = server.http_get_bytes
+
+        def fake(url, timeout=None):
+            urls.append(url)
+            if "%02d.bin.ttf" % (time.gmtime(start).tm_hour * 2 + time.gmtime(start).tm_min // 30) in url:
+                return data
+            raise OSError("404")
+
+        server.http_get_bytes = fake
+        try:
+            arc = server.AdsbLolArchive()
+            snap = {a["hex"]: a for a in arc.snapshot(start + 5, (50, -2, 52, 0))}
+            self.assertEqual(set(snap), {"4ca123", "406abc"})
+            a = snap["4ca123"]
+            self.assertAlmostEqual(a["lon"], -0.95, places=4)
+            self.assertAlmostEqual(a["alt"], 30250)
+            self.assertEqual(a["cs"], "RYR1AB")
+            self.assertEqual(a["sq"], "1234")
+            self.assertAlmostEqual(a["trk"], 90, delta=1)
+            self.assertGreater(a["vr"], 0)
+            self.assertTrue(snap["406abc"]["gnd"])
+            self.assertEqual(arc.snapshot(start + 5, (10, 10, 20, 20)), [])  # nothing in that box
+            self.assertEqual(len(arc.trail("4ca123", start - 3600, start + 25)), 3)
+            self.assertIsNone(arc.snapshot(time.time() - 60, (50, -2, 52, 0)))  # current half hour not archived yet
+        finally:
+            server.http_get_bytes = orig
+        self.assertTrue(urls[0].startswith("https://globe.adsb.lol/globe_history/"))
+
+
 class FakeUpstream(BaseHTTPRequestHandler):
     """Pretends to be adsb.lol: serves gzipped readsb JSON with two aircraft moving east."""
 
@@ -129,7 +185,8 @@ class EndToEndTests(unittest.TestCase):
         server.PROVIDERS["fake"] = server._readsb("fake", up, "/v2/point/{lat}/{lon}/{r}")
         cls.tmp = tempfile.TemporaryDirectory()
         args = server.build_arg_parser().parse_args(
-            ["--provider", "fake", "--db", os.path.join(cls.tmp.name, "t.db"), "--record-interval", "0", "--no-samples"])
+            ["--provider", "fake", "--db", os.path.join(cls.tmp.name, "t.db"), "--record-interval", "0", "--no-samples",
+             "--no-archive"])
         cls.app = server.App(args)
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(cls.app))
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()

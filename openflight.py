@@ -20,12 +20,14 @@ Help: python3 openflight.py --help
 from __future__ import annotations
 
 import argparse
+import array
 import gzip
 import json
 import math
 import os
 import random
 import sqlite3
+import struct
 import sys
 import threading
 import time
@@ -227,6 +229,16 @@ def http_get_json(url, timeout=None, data=None, headers=None):
     if raw[:2] == b"\x1f\x8b":
         raw = gzip.decompress(raw)
     return json.loads(raw.decode("utf-8"))
+
+
+def http_get_bytes(url, timeout=None):
+    timeout = HTTP_TIMEOUT * 3 if timeout is None else timeout
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept-Encoding": "gzip"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    return raw
 
 
 class ReadsbProvider:
@@ -601,6 +613,173 @@ def interpolate_snapshot(rows, t, bbox, max_gap=180.0, max_age=60.0):
     return out
 
 
+class AdsbLolArchive:
+    """Worldwide replay from adsb.lol's public history (the files behind its own replay feature).
+
+    adsb.lol writes one file per half hour (UTC) holding every aircraft position it saw, in
+    slices every few seconds. Files appear once the half hour is over and are kept for about
+    45 days. The data is open (ODbL): https://adsb.lol
+
+    File layout (tar1090 "heatmap" format, little-endian int32, 4 per 16-byte record):
+      slice header : MAGIC, time_ms_high, time_ms_low, interval_ms & 0xFFFF
+      position     : flags<<24 | icao, lat*1e6, lon*1e6, (gs*10)<<16 | (alt/25 & 0xFFFF)
+      info         : flags<<24 | icao, 1<<30 | squawk, callsign (8 ASCII bytes over 2 ints)
+    """
+
+    BASE = "https://globe.adsb.lol/globe_history/{y:04d}/{m:02d}/{d:02d}/heatmap/{idx:02d}.bin.ttf"
+    MAGIC = 0xE7F7C9D
+    CHUNK = 1800
+    RETENTION_DAYS = 45
+
+    def __init__(self, enabled=True, cache_size=3):
+        self.enabled = enabled
+        self.cache_size = cache_size
+        self._cache = OrderedDict()
+        self._missing = {}
+        self._lock = threading.Lock()
+        self._loading = {}
+
+    def covers(self, t):
+        now = time.time()
+        return self.enabled and now - self.RETENTION_DAYS * 86400 <= t < (now // self.CHUNK) * self.CHUNK
+
+    def _download(self, start):
+        tm = time.gmtime(start)
+        url = self.BASE.format(y=tm.tm_year, m=tm.tm_mon, d=tm.tm_mday, idx=tm.tm_hour * 2 + tm.tm_min // 30)
+        raw = http_get_bytes(url)
+        if len(raw) % 16:
+            raise ValueError("bad archive file size")
+        ints = array.array("i")
+        ints.frombytes(raw)
+        if sys.byteorder != "little":
+            ints.byteswap()
+        magic = struct.pack("<I", self.MAGIC)
+        slices = []  # (int index of header, unix time)
+        pos = raw.find(magic)
+        while pos != -1:
+            if pos % 16 == 0:
+                i = pos // 4
+                slices.append((i, ((ints[i + 1] & 0xFFFFFFFF) * 4294967296 + (ints[i + 2] & 0xFFFFFFFF)) / 1000.0))
+            pos = raw.find(magic, pos + 4)
+        if not slices:
+            raise ValueError("no data in archive file")
+        info = {}
+        for i in range(0, len(ints), 4):
+            if ints[i + 1] >= 1073741824 and ints[i] != self.MAGIC:
+                cs = raw[4 * (i + 2):4 * (i + 4)].split(b"\0", 1)[0].decode("ascii", "replace").strip()
+                info[self._hex(ints[i])] = (cs or None, "%04d" % (ints[i + 1] & 0xFFFF))
+        return {"ints": ints, "slices": slices, "info": info}
+
+    @staticmethod
+    def _hex(word):
+        h = "%06x" % (word & 0xFFFFFF)
+        return "~" + h if word & 0x1000000 else h
+
+    def _chunk(self, start):
+        """Load (or reuse) the half-hour file starting at `start`; None if unavailable."""
+        while True:
+            with self._lock:
+                if start in self._cache:
+                    self._cache.move_to_end(start)
+                    return self._cache[start]
+                if time.time() - self._missing.get(start, 0) < 120:
+                    return None
+                ev = self._loading.get(start)
+                if ev is None:
+                    ev = self._loading[start] = threading.Event()
+                    break
+            ev.wait(60)  # another request is downloading this file
+        try:
+            chunk = self._download(start)
+        except Exception as e:
+            print("adsb.lol archive %s: %s" % (time.strftime("%Y-%m-%d %H:%M", time.gmtime(start)), e), file=sys.stderr)
+            chunk = None
+        with self._lock:
+            del self._loading[start]
+            if chunk is None:
+                self._missing[start] = time.time()
+            else:
+                self._cache[start] = chunk
+                while len(self._cache) > self.cache_size:
+                    self._cache.popitem(last=False)
+        ev.set()
+        return chunk
+
+    def _rows(self, t_from, t_to, bbox=None, hexid=None):
+        """Decoded positions between two times, optionally only in bbox or for one aircraft."""
+        rows = []
+        start = (t_from // self.CHUNK) * self.CHUNK
+        while start <= t_to:
+            if self.covers(start):
+                chunk = self._chunk(start)
+            else:
+                chunk = None
+            start += self.CHUNK
+            if chunk is None:
+                continue
+            ints, slices, info = chunk["ints"], chunk["slices"], chunk["info"]
+            if bbox:
+                lamin, lamax = int((bbox[0] - 0.5) * 1e6), int((bbox[2] + 0.5) * 1e6)
+                wide = (bbox[0] - 0.5, bbox[1] - 0.5, bbox[2] + 0.5, bbox[3] + 0.5)
+            for n, (i, ts) in enumerate(slices):
+                if ts < t_from or ts > t_to:
+                    continue
+                end = slices[n + 1][0] if n + 1 < len(slices) else len(ints)
+                for j in range(i + 4, end, 4):
+                    lat = ints[j + 1]
+                    if lat >= 1073741824:
+                        continue
+                    if bbox and not (lamin <= lat <= lamax):
+                        continue
+                    h = self._hex(ints[j])
+                    if hexid and h != hexid:
+                        continue
+                    lon = ints[j + 2] / 1e6
+                    if bbox and not in_bbox(lat / 1e6, lon, wide):
+                        continue
+                    packed = ints[j + 3]
+                    alt = packed & 0xFFFF
+                    if alt & 0x8000:
+                        alt -= 0x10000
+                    gs = packed >> 16
+                    cs, sq = info.get(h, (None, None))
+                    rows.append({
+                        "hex": h, "cs": cs, "reg": None, "type": None, "lat": lat / 1e6, "lon": lon,
+                        "alt": 0.0 if alt == -123 else None if alt == -124 else alt * 25.0, "gnd": alt == -123,
+                        "gs": None if gs == -1 else gs / 10.0, "trk": None, "vr": None, "sq": sq, "cat": None, "ts": ts,
+                    })
+        return rows
+
+    @staticmethod
+    def _add_motion(rows):
+        """The archive has no heading or climb rate, so work them out from consecutive positions."""
+        by_hex = {}
+        for r in rows:
+            by_hex.setdefault(r["hex"], []).append(r)
+        for pts in by_hex.values():
+            pts.sort(key=lambda p: p["ts"])
+            for k, p in enumerate(pts):
+                a, b = (p, pts[k + 1]) if k + 1 < len(pts) else (pts[k - 1], p) if k else (None, None)
+                if a is None or b["ts"] <= a["ts"]:
+                    continue
+                if haversine_nm(a["lat"], a["lon"], b["lat"], b["lon"]) > 0.02:
+                    p["trk"] = _bearing(a["lat"], a["lon"], b["lat"], b["lon"])
+                if a["alt"] is not None and b["alt"] is not None and not (a["gnd"] or b["gnd"]):
+                    p["vr"] = round((b["alt"] - a["alt"]) / (b["ts"] - a["ts"]) * 60 / 64) * 64
+        return rows
+
+    def snapshot(self, t, bbox):
+        if not self.covers(t):
+            return None
+        rows = self._add_motion(self._rows(t - 60, t + 60, bbox=bbox))
+        return interpolate_snapshot(rows, t, bbox, max_gap=90.0, max_age=40.0)
+
+    def trail(self, hexid, t_from, t_to):
+        # Only the half hours that are already loaded or needed for t_to, to keep downloads small.
+        t_from = max(t_from, (t_to // self.CHUNK) * self.CHUNK - self.CHUNK)
+        return [{k: r[k] for k in ("ts", "lat", "lon", "alt", "gnd")} for r in self._rows(t_from, t_to, hexid=hexid)]
+
+
 class AdsbxSamples:
     """ADS-B Exchange publishes free whole-world snapshots every 5 s for the 1st of each month.
 
@@ -689,6 +868,7 @@ class App:
         self.demo = next((p for p in self.live.providers if isinstance(p, DemoProvider)), None)
         self.store = Store(args.db, args.record_interval, args.retention_days)
         self.samples = AdsbxSamples(enabled=not args.no_samples and self.demo is None)
+        self.archive = AdsbLolArchive(enabled=not args.no_archive and self.demo is None)
 
 
 def make_handler(app, fixed_route=None):
@@ -758,6 +938,9 @@ def make_handler(app, fixed_route=None):
                 "retentionDays": app.store.retention_days,
                 "recorded": app.store.coverage(),
                 "samples": app.samples.enabled,
+                "archive": {"from": time.time() - AdsbLolArchive.RETENTION_DAYS * 86400,
+                            "to": (time.time() // AdsbLolArchive.CHUNK) * AdsbLolArchive.CHUNK}
+                if app.archive.enabled else None,
                 "demo": app.demo is not None,
                 "serverless": app.serverless,
                 "lastError": app.live.last_error,
@@ -785,6 +968,10 @@ def make_handler(app, fixed_route=None):
             aircraft = interpolate_snapshot(rows, t, bbox, max_gap=gap, max_age=max(60.0, app.store.record_interval * 3))
             source = "recorded"
             if not aircraft:
+                archived = app.archive.snapshot(t, bbox)
+                if archived:
+                    aircraft, source = archived, "adsb.lol archive"
+            if not aircraft:
                 sample = app.samples.snapshot(t, bbox)
                 if sample is not None:
                     aircraft, source = sample, "adsbexchange-samples"
@@ -807,7 +994,10 @@ def make_handler(app, fixed_route=None):
                             pts.append({k: s[k] for k in ("ts", "lat", "lon", "alt", "gnd")})
                         t += step
                 return self.send_json({"hex": hexid, "points": last_segment(pts, max_gap=step * 3)})
-            self.send_json({"hex": hexid, "points": last_segment(app.store.trail(hexid, t_from, t_to))})
+            points = app.store.trail(hexid, t_from, t_to)
+            if not points and app.archive.covers(t_to):
+                points = app.archive.trail(hexid, t_from, t_to)
+            self.send_json({"hex": hexid, "points": last_segment(points)})
 
         # GET /api/find?q=BAW123   (worldwide lookup by callsign, registration or hex)
         def api_find(self, q):
@@ -862,6 +1052,8 @@ def build_arg_parser():
     p.add_argument("--retention-days", type=float, default=7.0, help="delete recordings older than this (default 7)")
     p.add_argument("--record", dest="areas", action="append", type=parse_area, default=[],
                    metavar="LAT,LON,NM", help="keep recording this area even with no browser open; repeatable")
+    p.add_argument("--no-archive", action="store_true",
+                   help="never fetch replay data from the adsb.lol history archive")
     p.add_argument("--no-samples", action="store_true",
                    help="never fetch ADS-B Exchange 1st-of-month history samples")
     p.add_argument("--tiles", default=os.environ.get("OPENFLIGHT_TILES", "https://tile.openstreetmap.org/{z}/{x}/{y}.png"),
@@ -891,6 +1083,7 @@ def serverless_app():
     OPENFLIGHT_PROVIDERS=adsb.lol,adsb.fi  live sources in fallback order
     OPENFLIGHT_TILES=https://...           raster tile URL
     OPENFLIGHT_NO_SAMPLES=1                skip ADS-B Exchange 1st-of-month samples
+    OPENFLIGHT_NO_ARCHIVE=1                skip the adsb.lol history archive
     """
     global _serverless_app, HTTP_TIMEOUT
     with _serverless_lock:
@@ -902,6 +1095,8 @@ def serverless_app():
                 argv += ["--provider", name]
             if os.environ.get("OPENFLIGHT_NO_SAMPLES", "").lower() in ("1", "true", "yes"):
                 argv.append("--no-samples")
+            if os.environ.get("OPENFLIGHT_NO_ARCHIVE", "").lower() in ("1", "true", "yes"):
+                argv.append("--no-archive")
             if "OPENFLIGHT_HTTP_TIMEOUT" not in os.environ:
                 HTTP_TIMEOUT = 6.0  # leave room to try the fallbacks inside the function time limit
             _serverless_app = App(resolve_providers(build_arg_parser().parse_args(argv)), serverless=True)
