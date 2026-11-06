@@ -1,10 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
   "outputDirectory": "public",
   "functions": {
     "api/*.py": {
-      "includeFiles": "server.py",
-      "maxDuration": 30
+      "maxDuration": 30,
+      "excludeFiles": "{tests/**,public/**,*.db}"
     }
   }
 }

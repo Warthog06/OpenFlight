@@ -131,7 +131,7 @@
     } catch {
       throw new Error(res.status === 404
         ? `${new URL(url, location.href).pathname} was not found (HTTP 404). The page is being served without the OpenFlight API: ` +
-          'run "python3 server.py", or deploy with the api/ folder (see README)'
+          'run "python3 openflight.py", or deploy with the api/ folder (see README)'
         : `the server sent a non-JSON reply (HTTP ${res.status})`);
     }
     if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
@@ -334,7 +334,7 @@
           state.noDataWarned = true;
           toast(state.config.serverless
             ? 'No flight history for this time. The hosted version can only replay the 1st day of each month; ' +
-              'run server.py on your own computer to record and replay any time.'
+              'run openflight.py on your own computer to record and replay any time.'
             : 'No recorded flights here at this time. OpenFlight can replay times it was running and ' +
               'recording (see --record in the README), plus the 1st day of each month worldwide.', 'info', 9000);
         } else if (j.source !== 'none') {
@@ -711,8 +711,8 @@
     }
     if (c.serverless) {
       el.textContent = c.samples
-        ? 'Hosted version: replay works for the 1st of each month. Run server.py yourself to record any time.'
-        : 'Hosted version: live only. Run server.py yourself to record and replay.';
+        ? 'Hosted version: replay works for the 1st of each month. Run openflight.py yourself to record any time.'
+        : 'Hosted version: live only. Run openflight.py yourself to record and replay.';
       return;
     }
     const parts = [];

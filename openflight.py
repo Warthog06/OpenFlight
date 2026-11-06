@@ -13,8 +13,8 @@ Only the Python standard library is used. The server:
 * has a built-in "demo" source with simulated traffic that needs no
   network at all
 
-Run:  python3 server.py            then open http://localhost:8080
-Help: python3 server.py --help
+Run:  python3 openflight.py            then open http://localhost:8080
+Help: python3 openflight.py --help
 """
 
 from __future__ import annotations

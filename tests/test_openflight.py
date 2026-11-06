@@ -1,4 +1,4 @@
-"""Tests for server.py. Run with:  python3 -m unittest discover -s tests"""
+"""Tests for openflight.py. Run with:  python3 -m unittest discover -s tests"""
 
 import gzip
 import json
@@ -12,7 +12,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import server  # noqa: E402
+import openflight as server  # noqa: E402
 
 
 def readsb_payload(now_s, aircraft):

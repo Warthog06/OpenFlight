@@ -1,9 +1,9 @@
-"""Vercel serverless function for /api/config (the logic lives in server.py)."""
+"""Vercel serverless function for /api/config (the logic lives in openflight.py)."""
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import server  # noqa: E402
+import openflight  # noqa: E402
 
-handler = server.make_handler(server.serverless_app(), fixed_route="/api/config")
+handler = openflight.make_handler(openflight.serverless_app(), fixed_route="/api/config")

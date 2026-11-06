@@ -13,7 +13,7 @@ The only dependency is Python 3.8+ (standard library). MapLibre GL and deck.gl s
 ## Run it
 
 ```bash
-python3 server.py
+python3 openflight.py
 ```
 
 Then open http://localhost:8080.
@@ -21,12 +21,12 @@ Then open http://localhost:8080.
 To try it with simulated traffic (no internet needed, and every date works):
 
 ```bash
-python3 server.py --demo
+python3 openflight.py --demo
 ```
 
 ## Deploy to Vercel (free)
 
-Import the repo into Vercel with the default settings. The website comes from `public/`, and each file in `api/` becomes a small serverless function that runs the same code as `server.py`. No build step is needed.
+Import the repo into Vercel. The website comes from `public/`, and each file in `api/` becomes a small serverless function that runs the same code as `openflight.py`. No build step is needed. `vercel.json` sets everything else; in the project settings just make sure **Root Directory** is the repo root (left empty), not `public`.
 
 Optional environment variables (Project → Settings → Environment Variables):
 
@@ -37,7 +37,7 @@ Optional environment variables (Project → Settings → Environment Variables):
 | `OPENFLIGHT_TILES=https://…/{z}/{x}/{y}.png` | a different map tile server |
 | `OPENFLIGHT_NO_SAMPLES=1` | turn off 1st-of-month history |
 
-**What's different on Vercel:** serverless functions can't run in the background or keep files, so the hosted site **does not record**. Live view and 3D work the same. Replay only works for the 1st day of each month (ADS-B Exchange samples), or for any time in demo mode. For full recording and replay, run `python3 server.py` on a machine that stays on, such as a home PC, a Raspberry Pi or a free VM.
+**What's different on Vercel:** serverless functions can't run in the background or keep files, so the hosted site **does not record**. Live view and 3D work the same. Replay only works for the 1st day of each month (ADS-B Exchange samples), or for any time in demo mode. For full recording and replay, run `python3 openflight.py` on a machine that stays on, such as a home PC, a Raspberry Pi or a free VM.
 
 ## Where the data comes from
 
@@ -57,7 +57,7 @@ No free service offers worldwide flight history for any date, so OpenFlight buil
 1. **Everything you watch live is recorded** into `openflight.db` (SQLite), with a position for each aircraft every 5 seconds by default. Any time and place you've viewed can be replayed later.
 2. **To record an area even when no browser is open**, run:
    ```bash
-   python3 server.py --record 51.47,-0.45,150
+   python3 openflight.py --record 51.47,-0.45,150
    ```
    This records 150 nm around London Heathrow around the clock. `--record` can be given more than once.
 3. **On the 1st day of every month**, the whole world is available from ADS-B Exchange's free sample files. This is used automatically when nothing was recorded locally. It works best at slower playback speeds, since each 5-second step is a separate download.
@@ -69,7 +69,7 @@ If you pick a time with no data, the app tells you.
 ## Options
 
 ```text
-python3 server.py --help
+python3 openflight.py --help
 
   --port 8080                  web port
   --host 127.0.0.1             use 0.0.0.0 to open it to your network
@@ -115,8 +115,8 @@ python3 -m unittest discover -s tests
 The tests cover parsing, interpolation, recording and replay. A fake upstream server stands in for the live APIs.
 
 ```
-server.py            HTTP server, data providers, recorder, replay
-api/*.py             Vercel serverless entry points (thin wrappers around server.py)
+openflight.py        HTTP server, data providers, recorder, replay
+api/*.py             Vercel serverless entry points (thin wrappers around openflight.py)
 vercel.json          Vercel settings
 public/index.html    page layout
 public/app.js        map, 3D rendering, time controls
