@@ -6,6 +6,7 @@
   const FT_TO_M = 0.3048;
   const MAX_RADIUS_NM = 250;
   const TRAIL_MAX = 600;
+  const AIRCRAFT_LAYERS = ['aircraft', 'aircraft-3d']; // 2D icons and 3D models (different ids: deck.gl matches layers by id)
 
   const state = {
     config: null,
@@ -194,6 +195,11 @@
         state.aircraft.set(a.hex, e);
       } else {
         const before = displayPos(e, now, rn);
+        if (e.d.trk != null && a.trk != null && fixT > e.fixT) {
+          // Turn rate (deg/s) from the change in track between fixes, smoothed; used to bank the 3D model.
+          const rate = ((((a.trk - e.d.trk) % 360) + 540) % 360 - 180) / (fixT - e.fixT);
+          e.turn = 0.6 * (e.turn || 0) + 0.4 * Math.max(-4, Math.min(4, rate));
+        }
         e.d = a; e.fixT = fixT;
         const after = project(e, now);
         const dLat = before.lat - after.lat, dLon = before.lon - after.lon;
@@ -256,9 +262,15 @@
   const overlay = new deck.MapboxOverlay({
     interleaved: false,
     layers: [],
+    // Soft light from above for the 3D aircraft models (2D layers are unaffected).
+    effects: [new deck.LightingEffect({
+      ambient: new deck.AmbientLight({ color: [255, 255, 255], intensity: 1.15 }),
+      sun: new deck.DirectionalLight({ color: [255, 255, 255], intensity: 1.1, direction: [-1, 2, -3] }),
+      fill: new deck.DirectionalLight({ color: [255, 255, 255], intensity: 0.35, direction: [1, -1, -0.5] }),
+    })],
     getCursor: ({ isHovering, isDragging }) => (isDragging ? 'grabbing' : isHovering ? 'pointer' : 'grab'),
     getTooltip: ({ object, layer }) => {
-      if (!object || !layer || layer.id !== 'aircraft') return null;
+      if (!object || !layer || !AIRCRAFT_LAYERS.includes(layer.id)) return null;
       const d = object.e.d;
       return {
         html: `<b>${esc(d.cs || d.reg || d.hex.toUpperCase())}</b> ${esc(d.type || '')}<br>${esc(fmtAlt({ ...d, alt: object.alt }))}` +
@@ -270,7 +282,7 @@
   map.addControl(overlay);
 
   map.on('click', (ev) => {
-    const info = overlay.pickObject({ x: ev.point.x, y: ev.point.y, radius: 8, layerIds: ['aircraft'] });
+    const info = overlay.pickObject({ x: ev.point.x, y: ev.point.y, radius: 8, layerIds: AIRCRAFT_LAYERS });
     if (info && info.object) select(info.object.e.hex);
     else select(null);
   });
@@ -438,20 +450,7 @@
       }));
     }
 
-    const iconCommon = {
-      data: visible, billboard: false, sizeUnits: 'pixels',
-      getPosition: (v) => [v.lon, v.lat, v.z], getIcon: (v) => iconFor(v.e.d), getAngle: (v) => -(v.e.d.trk || 0),
-      parameters: { depthTest: false },
-    };
-    layers.push(new deck.IconLayer({
-      ...iconCommon, id: 'aircraft-outline', getSize: (v) => sizeFor(v.e.d) + 5, getColor: [10, 14, 20, 200],
-    }));
-    layers.push(new deck.IconLayer({
-      ...iconCommon, id: 'aircraft', pickable: true,
-      getSize: (v) => sizeFor(v.e.d) + (v.e.hex === state.selected ? 6 : 0),
-      getColor: (v) => (v.e.hex === state.selected ? [245, 179, 1, 255] : altColor(v.alt, v.e.d.gnd)),
-    }));
-
+    // Labels go under the aircraft so the 3D models aren't hidden behind them.
     if (state.showLabels && map.getZoom() >= 6.5) {
       const labelled = visible.length > 700 ? visible.filter((v) => v.e.hex === state.selected || v.alt > 20000 || map.getZoom() > 9) : visible;
       layers.push(new deck.TextLayer({
@@ -468,7 +467,66 @@
       }));
     }
 
+    if (state.is3D) {
+      layers.push(planeModelLayer(visible));
+    } else {
+      const iconCommon = {
+        data: visible, billboard: false, sizeUnits: 'pixels',
+        getPosition: (v) => [v.lon, v.lat, v.z], getIcon: (v) => iconFor(v.e.d), getAngle: (v) => -(v.e.d.trk || 0),
+        parameters: { depthTest: false },
+      };
+      layers.push(new deck.IconLayer({
+        ...iconCommon, id: 'aircraft-outline', getSize: (v) => sizeFor(v.e.d) + 5, getColor: [10, 14, 20, 200],
+      }));
+      layers.push(new deck.IconLayer({
+        ...iconCommon, id: 'aircraft', pickable: true,
+        getSize: (v) => sizeFor(v.e.d) + (v.e.hex === state.selected ? 6 : 0),
+        getColor: (v) => (v.e.hex === state.selected ? [245, 179, 1, 255] : altColor(v.alt, v.e.d.gnd)),
+      }));
+    }
+
     overlay.setProps({ layers });
+  }
+
+  // ------------------------------------------------------------------ 3D aircraft model
+
+  const KT_TO_MS = 0.514444;
+  const FPM_TO_MS = 0.00508;
+  const DEG = 180 / Math.PI;
+
+  // Nose up/down: the climb angle, steepened by the same exaggeration as the altitudes so the
+  // model lines up with its trail and altitude line.
+  function pitchOf(d) {
+    if (d.gnd || !d.vr || !(d.gs > 30)) return 0;
+    const angle = Math.atan2(d.vr * FPM_TO_MS * state.exag, d.gs * KT_TO_MS) * DEG;
+    return Math.max(-35, Math.min(35, angle));
+  }
+  // Bank angle for a coordinated turn: tan(bank) = speed * turn rate / g.
+  function bankOf(e) {
+    if (e.d.gnd || !e.turn || !(e.d.gs > 30)) return 0;
+    const bank = Math.atan((e.d.gs * KT_TO_MS) * (e.turn / DEG) / 9.81) * DEG;
+    return Math.max(-30, Math.min(30, bank));
+  }
+
+  function planeModelLayer(visible) {
+    // Keep the model about the same size on screen as the 2D icons, whatever the zoom.
+    const c = map.getCenter();
+    const metresPerPixel = 40075016.686 * Math.cos(c.lat * Math.PI / 180) / (512 * 2 ** map.getZoom());
+    const scale = Math.max(1, (40 * metresPerPixel) / OpenFlightPlane.length);
+    return new deck.SimpleMeshLayer({
+      id: 'aircraft-3d', data: visible, mesh: OpenFlightPlane.mesh, sizeScale: scale, pickable: true,
+      getPosition: (v) => [v.lon, v.lat, v.z],
+      // deck.gl order is [pitch, yaw, roll]; yaw 0 points east and turns anticlockwise,
+      // and a positive pitch value tips the nose down.
+      getOrientation: (v) => [-pitchOf(v.e.d), 90 - (v.e.d.trk || 0), bankOf(v.e)],
+      getScale: (v) => {
+        const k = (v.e.hex === state.selected ? 1.3 : 1) * (v.e.d.cat === 'A1' || v.e.d.cat === 'B1' ? 0.7 : v.e.d.cat === 'A5' ? 1.2 : 1);
+        return [k, k, k];
+      },
+      getColor: (v) => (v.e.hex === state.selected ? [245, 179, 1, 255] : altColor(v.alt, v.e.d.gnd)),
+      material: { ambient: 0.45, diffuse: 0.7, shininess: 24, specularColor: [70, 70, 70] },
+      updateTriggers: { getOrientation: [state.exag], getColor: [state.selected], getScale: [state.selected] },
+    });
   }
 
   // ------------------------------------------------------------------ selection & panel

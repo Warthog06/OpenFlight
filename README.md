@@ -3,7 +3,7 @@
 A free, self-hosted flight radar in the style of Flightradar24. It uses OpenStreetMap, needs no API keys or accounts, and costs nothing to run.
 
 - **Live map, updated every second.** Between updates, aircraft are moved smoothly using their speed, track and climb rate.
-- **3D view with altitudes.** Tilt the map or press **3D**. Each aircraft is drawn at its real altitude, with a line down to the ground and its flight level shown. The altitude scale can be exaggerated up to ×12 so climbs and descents are easy to see.
+- **3D view with altitudes.** Tilt the map or press **3D**. Each aircraft is drawn as a small 3D airliner at its real altitude, with a line down to the ground and its flight level shown. The model points along the aircraft's track, tilts its nose with the climb or descent, and banks into turns. The altitude scale can be exaggerated up to ×12 so climbs and descents are easy to see; the nose tilt follows the same exaggeration.
 - **Pick any date and time.** Choose a moment, press **Go**, and play it back at 1× to 60×, with pause and ±1/±5 minute steps. Replay links can be shared, because the time is stored in the URL.
 - **Colour by altitude** (same scale as the legend), trails, callsign labels, worldwide search by callsign, registration or ICAO hex, a details panel with the route when known, and a "follow" mode.
 - **Works on phones.**
@@ -128,6 +128,7 @@ api/*.py             Vercel serverless entry points (thin wrappers around openfl
 vercel.json          Vercel settings
 public/index.html    page layout
 public/app.js        map, 3D rendering, time controls
+public/plane-model.js  the low-poly 3D aircraft model, built in code (no model file)
 public/style.css     styles
 public/vendor/       MapLibre GL 4.7.1 (BSD-3) and deck.gl 9.1.15 (MIT), unmodified
 ```
